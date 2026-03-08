@@ -1,0 +1,35 @@
+# ============================================================
+# Echotik 采集任务配置
+# ============================================================
+# nav_parent_selector: 一级菜单展开按钮（Arco Design 箭头图标）
+# submenu_id:          子菜单容器 ID（用于限定二级菜单查找范围）
+# nav_child:           二级菜单链接文字（在 submenu_id 容器内精确匹配）
+# time_tab_map:        时间Tab文字，日榜留空（默认选中，无需点击）
+# export_count:        导出条数文字（如 "200 Records"）
+# ============================================================
+
+modules:
+
+  - name: 商品榜
+    nav_parent_selector: "div:nth-child(3) > .arco-menu-inline-header > .arco-menu-icon-suffix > .arco-icon"
+    submenu_id: "arco-menu-0-submenu-inline-1"
+    nav_child: "Top Sold"
+    wins: [d, w, m]
+    ds: p
+    time_tab_map:
+      d: ""           # Daily 是默认选中，不需要点击
+      w: "Weekly"
+      m: "Monthly"
+    export_count: "200 Records"
+
+  - name: 小店榜
+    nav_parent_selector: "div:nth-child(4) > .arco-menu-inline-header > .arco-menu-icon-suffix > .arco-icon"
+    submenu_id: "arco-menu-0-submenu-inline-2"
+    nav_child: "Best Cross-border Seller"
+    wins: [d, w, m]
+    ds: s
+    time_tab_map:
+      d: ""           # Daily 是默认选中，不需要点击
+      w: "Weekly"
+      m: "Monthly"
+    export_count: "200 Records"

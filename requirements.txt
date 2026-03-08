@@ -1,0 +1,31 @@
+# Echotik 采集器依赖
+# 安装方法：pip install -r requirements.txt
+# 安装 Playwright 浏览器：playwright install chromium
+
+# 浏览器自动化
+playwright>=1.40.0
+
+# HTTP 请求（报警通知 + AI API 调用）
+requests>=2.31.0
+
+# 日志
+loguru>=0.7.0
+
+# 环境变量管理
+python-dotenv>=1.0.0
+
+# YAML 配置文件
+PyYAML>=6.0
+
+# 数据处理（与 pipeline 共用）
+pandas>=2.0.0
+openpyxl>=3.1.0
+
+# -------------------------------------------------------
+# AI 提供商 SDK（按需安装，用哪个装哪个）
+# ANOMALY_PROVIDER=rule/qwen/openai/gemini/kimi
+#   → 无需额外 SDK，已由 requests 覆盖
+# ANOMALY_PROVIDER=claude
+#   → 需要：pip install anthropic
+# -------------------------------------------------------
+# anthropic>=0.30.0
