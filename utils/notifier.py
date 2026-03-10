@@ -11,7 +11,7 @@ utils/notifier.py
 """
 
 import os
-from datetime import datetime
+from datetime import datetime, date
 from pathlib import Path
 from typing import List
 
@@ -28,6 +28,21 @@ FEISHU_WEBHOOK = os.getenv("FEISHU_WEBHOOK_URL", "").strip()
 FEISHU_APP_ID     = os.getenv("FEISHU_APP_ID", "").strip()
 FEISHU_APP_SECRET = os.getenv("FEISHU_APP_SECRET", "").strip()
 FEISHU_CHAT_ID    = os.getenv("FEISHU_CHAT_ID", "").strip()
+
+
+def _account_usage_days() -> str:
+    """计算 Echotik 账号使用天数（从 ECHOTIK_ACCOUNTS_SINCE 起算）"""
+    since = os.getenv("ECHOTIK_ACCOUNTS_SINCE", "").strip()
+    if not since:
+        return ""
+    try:
+        start = datetime.strptime(since, "%Y-%m-%d").date()
+        n = (date.today() - start).days + 1  # 变动当天记为第1天
+        accounts = os.getenv("ECHOTIK_ACCOUNTS", "").strip()
+        count = len(accounts.split(",")) if accounts else 0
+        return f"Echotik 账号（{count}个）已使用 {n} 天（自 {since}）"
+    except ValueError:
+        return ""
 
 
 def _send_wecom(content: str):
@@ -79,12 +94,15 @@ def _notify(title: str, content: str):
 def notify_success(captured: str, success: list, attempt: int):
     """采集全部成功通知"""
     ts = datetime.now().strftime("%H:%M")
+    usage = _account_usage_days()
     content = (
         f"采集日期：{captured}\n"
         f"完成时间：{ts}（第 {attempt} 次尝试）\n"
         f"成功模块：{', '.join(success)}\n"
         f"数据清洗流水线已触发。"
     )
+    if usage:
+        content += f"\n{usage}"
     log_node("发送采集成功通知", level="INFO")
     _notify("✅ Echotik 采集完成", content)
 
