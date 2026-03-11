@@ -51,6 +51,12 @@ class BrowserSession:
         self.context = context
         self._accounts = self._load_accounts()
 
+    def set_single_account(self, account: str, password: str):
+        """指定使用单个账号登录（由 trigger 多账号轮换调用）"""
+        self._accounts = [{"account": account, "password": password}]
+        log_node("指定单账号登录", level="INFO",
+                 account=self._mask(account))
+
     def _load_accounts(self) -> list[dict]:
         accounts_str  = os.getenv("ECHOTIK_ACCOUNTS", "")
         passwords_str = os.getenv("ECHOTIK_PASSWORDS", "")

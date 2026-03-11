@@ -179,17 +179,30 @@ async def run_with_retry(
     module_filter: str = "",
 ) -> bool:
     """
-    下载流程（最多 max_attempts 次尝试，每次重新启动浏览器）
+    下载流程（多账号轮换 × 每账号 max_attempts 次重试）
 
     流程：
-        尝试下载 → 全部success → route → pipeline → 通知成功 → 结束
-                 → 有stale/failed → 重试（如果还有机会）
-                 → 重试耗尽 → 通知失败 → 结束进程（重试交给 crontab）
+        账号A → 尝试1 → 尝试2 → 失败 → 换账号B → 尝试1 → 尝试2 → ...
+        任一账号全部成功 → route → pipeline → 通知成功 → 结束
+        所有账号都用完 → 通知失败 → 结束
 
     返回：
         True = 全部成功，False = 最终失败
     """
     proxy = _get_proxy_settings()
+
+    # 读取账号列表
+    accounts_str  = os.getenv("ECHOTIK_ACCOUNTS", "")
+    passwords_str = os.getenv("ECHOTIK_PASSWORDS", "")
+    accounts  = [a.strip().strip('"').strip("'")
+                 for a in accounts_str.split(",") if a.strip()]
+    passwords = [p.strip().strip('"').strip("'")
+                 for p in passwords_str.split(",") if p.strip()]
+    if not accounts:
+        log_node("未配置账号", level="ERROR")
+        return False
+
+    total_accounts = len(accounts)
 
     async def _launch_browser(pw):
         """启动浏览器，返回 (browser, context, page, session)"""
@@ -210,78 +223,101 @@ async def run_with_retry(
         return browser, context, page, session
 
     async with async_playwright() as pw:
-        pending_wins = wins[:]
+        all_routed = []  # 跨账号累积已成功路由的结果
 
-        for attempt in range(1, max_attempts + 1):
+        for acct_idx in range(total_accounts):
+            acct = accounts[acct_idx]
+            pwd  = passwords[acct_idx] if acct_idx < len(passwords) else ""
+            acct_masked = acct[:3] + "***@" + acct.split("@")[-1] if "@" in acct else acct[:3] + "***"
 
-            # ── 每次尝试都重新启动浏览器 + 重新登录 ──
-            log_node(f"第 {attempt}/{max_attempts} 次尝试：启动浏览器",
-                     level="START", tasks=pending_wins, captured=captured)
+            log_node(f"切换到账号 {acct_idx + 1}/{total_accounts}",
+                     level="START", account=acct_masked)
 
-            browser, context, page, session = await _launch_browser(pw)
+            pending_wins = wins[:]
 
-            try:
-                await session.ensure_login(page)
-            except RuntimeError as e:
-                log_node("登录失败，终止本次采集", level="ERROR", error=str(e))
-                await browser.close()
-                return False
+            for attempt in range(1, max_attempts + 1):
 
-            results = await download_fn(
-                wins=pending_wins,
-                captured=captured,
-                session=session,
-                page=page,
-                module_filter=module_filter,
-            )
+                log_node(f"账号 {acct_idx + 1} 第 {attempt}/{max_attempts} 次尝试：启动浏览器",
+                         level="START", account=acct_masked,
+                         tasks=pending_wins, captured=captured)
 
-            # ── 下载完成，立即关闭浏览器 ──
-            await browser.close()
-            log_node("浏览器已关闭", level="INFO", attempt=attempt)
+                browser, context, page, session = await _launch_browser(pw)
 
-            success_list = [r for r in results if r.status == "success"]
-            stale_list   = [r for r in results if r.status == "stale"]
-            failed_list  = [r for r in results if r.status == "failed"]
+                # 指定使用当前账号登录
+                session.set_single_account(acct, pwd)
 
-            log_node(f"第 {attempt} 次尝试结果", level="INFO",
-                     success=len(success_list),
-                     stale=len(stale_list),
-                     failed=len(failed_list))
+                try:
+                    await session.ensure_login(page)
+                except RuntimeError as e:
+                    log_node("登录失败，尝试下一个账号",
+                             level="WARN", account=acct_masked, error=str(e)[:80])
+                    await browser.close()
+                    break  # 跳出 attempt 循环，换下一个账号
 
-            # 路由本次成功的文件
-            if success_list:
-                route_fn(success_list)
-
-            # ── 全部成功 ──
-            if not stale_list and not failed_list:
-                pipeline_fn(captured)
-                notify_success(
+                results = await download_fn(
+                    wins=pending_wins,
                     captured=captured,
-                    success=[f"{r.module}/{r.win}" for r in success_list],
-                    attempt=attempt,
+                    session=session,
+                    page=page,
+                    module_filter=module_filter,
                 )
-                return True
 
-            # ── 还有重试机会：立即重试（不等待）──
-            if attempt < max_attempts:
-                log_node(
-                    f"部分任务未完成，立即进行第 {attempt + 1} 次尝试",
-                    level="WARN",
-                    stale=[f"{r.module}/{r.win}" for r in stale_list],
-                    failed=[f"{r.module}/{r.win}" for r in failed_list],
-                )
-                # 只重试未成功的粒度
-                pending_wins = list(set(
-                    [r.win for r in stale_list] + [r.win for r in failed_list]
-                ))
-                continue
+                await browser.close()
+                log_node("浏览器已关闭", level="INFO",
+                         account=acct_masked, attempt=attempt)
 
-            # ── 所有重试耗尽：通知失败，结束进程 ──
-            log_node("所有尝试均未完成，发送失败通知", level="ERROR")
-            notify_final_failure(
-                captured=captured,
-                stale=[f"{r.module}/{r.win}" for r in stale_list],
-                failed=[f"{r.module}/{r.win}" for r in failed_list],
-            )
+                success_list = [r for r in results if r.status == "success"]
+                stale_list   = [r for r in results if r.status == "stale"]
+                failed_list  = [r for r in results if r.status == "failed"]
+
+                log_node(f"账号 {acct_idx + 1} 第 {attempt} 次尝试结果",
+                         level="INFO",
+                         account=acct_masked,
+                         success=len(success_list),
+                         stale=len(stale_list),
+                         failed=len(failed_list))
+
+                if success_list:
+                    route_fn(success_list)
+                    all_routed.extend(success_list)
+
+                # ── 全部成功 ──
+                if not stale_list and not failed_list:
+                    pipeline_fn(captured)
+                    notify_success(
+                        captured=captured,
+                        success=[f"{r.module}/{r.win}" for r in all_routed],
+                        attempt=attempt,
+                    )
+                    return True
+
+                # ── 还有重试机会（同一账号）──
+                if attempt < max_attempts:
+                    log_node(
+                        f"部分任务未完成，同账号第 {attempt + 1} 次重试",
+                        level="WARN",
+                        account=acct_masked,
+                        stale=[f"{r.module}/{r.win}" for r in stale_list],
+                        failed=[f"{r.module}/{r.win}" for r in failed_list],
+                    )
+                    pending_wins = list(set(
+                        [r.win for r in stale_list] + [r.win for r in failed_list]
+                    ))
+                    continue
+
+                # ── 当前账号重试耗尽，换下一个账号 ──
+                log_node(f"账号 {acct_masked} 重试 {max_attempts} 次仍失败，尝试下一个账号",
+                         level="WARN",
+                         stale=[f"{r.module}/{r.win}" for r in stale_list],
+                         failed=[f"{r.module}/{r.win}" for r in failed_list])
+                break  # 跳出 attempt 循环
+
+        # ── 所有账号都用完：通知失败 ──
+        log_node("所有账号均已尝试，发送失败通知", level="ERROR")
+        notify_final_failure(
+            captured=captured,
+            stale=[],
+            failed=[f"全部 {total_accounts} 个账号均失败"],
+        )
 
         return False
