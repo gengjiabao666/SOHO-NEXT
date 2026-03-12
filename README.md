@@ -16,7 +16,7 @@
 
 - **运行环境**：WSL (Ubuntu) + Conda + Python 3.11
 - **浏览器自动化**：Playwright + Chromium
-- **当前版本**：v2.1
+- **当前版本：v2.5
 
 ---
 
@@ -43,11 +43,17 @@ echotik_collector/
 │   ├── logger.py         # emoji 日志系统（终端 + 文件双输出）
 │   ├── retry.py          # 异步指数退避重试装饰器
 │   ├── freshness.py      # MD5 新鲜度对比（避免重复处理旧数据）
+│   ├── quota.py          # 导出配额追踪（每日条数记录 + 超限告警）
+│   ├── account_tracker.py # 账号生命周期追踪（变更检测 + 到期预警）
 │   ├── notifier.py       # 企微 / 飞书报警通知
 │   └── cleanup_screenshots.py  # 截图定期清理（周转移 + 季度删除）
 │
 ├── config/
 │   └── tasks.yaml        # 采集任务配置（模块、选择器、粒度）
+│
+├── data/                 # 运行时数据存储
+│   ├── quota/            # 每日导出配额记录（YYYY-MM-DD.json）
+│   └── account_tracker.json  # 账号使用记录
 │
 ├── tools/                # 调试与测试工具
 │   ├── debug_page.py     # 页面内容调试（自动登录 + DOM 输出）
@@ -147,8 +153,8 @@ AI 调用失败时自动降级为 `rule` 模式，不影响主流程。
 
 **粒度调度规则：**
 - `d`（日榜）：每天执行
-- `w`（周榜）：每周一执行
-- `m`（月榜）：每月 1 日执行
+- `w`（周榜）：周一采集商品榜，周二采集小店榜
+- `m`（月榜）：1号采集商品榜，2号采集小店榜
 
 **重试机制：**
 - 第 1 次尝试失败（stale 或 failed）→ 立即重试第 2 次
@@ -166,10 +172,13 @@ AI 调用失败时自动降级为 `rule` 模式，不影响主流程。
 
 ### file_router.py — 文件路由模块
 
-将 `inbox/_tmp/` 中下载成功的文件移动到对应粒度子目录：
+将 `inbox/_tmp/` 中下载成功的文件移动到对应粒度子目录，支持品类子目录：
 - `inbox/d/` — 日榜
 - `inbox/w/` — 周榜
 - `inbox/m/` — 月榜
+- `inbox/d/pet_supplies/` — 日榜 Pet Supplies 品类
+- `inbox/w/pet_supplies/` — 周榜 Pet Supplies 品类
+- `inbox/m/pet_supplies/` — 月榜 Pet Supplies 品类
 
 `stale` 和 `failed` 状态的文件留在 `_tmp/` 供人工排查。
 
@@ -202,6 +211,34 @@ AI 调用失败时自动降级为 `rule` 模式，不影响主流程。
 - 最终采集失败（所有重试耗尽）
 - Pipeline 执行失败
 - 验证码 / 账号风控
+- 账号订阅到期
+
+新增功能（v2.3+）：
+- 飞书应用 API 文件推送（raw/clean/candidates 文件自动发送到群）
+- 账号使用天数统计（成功通知中显示）
+
+---
+
+### visual_export_batch.py — 批量品类采集（实验性）
+
+独立脚本，支持按品类批量导出多个榜单数据。
+
+**用法：**
+```bash
+python visual_export_batch.py --category "Pet Supplies" --tasks "top_sold:d,top_sold:w,shops:d"
+```
+
+**支持的榜单类型：**
+| 类型 | 名称 | 支持粒度 | 品类筛选 |
+|------|------|----------|----------|
+| `top_sold` | 热销榜 | d/w/m | 支持 |
+| `new_products` | 新品榜 | d | 支持 |
+| `shops` | 小店榜 | d/w/m | 不支持 |
+
+**特性：**
+- 多账号轮换（账号到期自动切换）
+- 任务组合验证（拒绝无效的 ranking:win 组合）
+- headless 模式运行（无需 Xvfb）
 
 ---
 
@@ -421,7 +458,7 @@ Echotik 网站
     ↓  Playwright 浏览器自动导出
 inbox/_tmp/（临时暂存）
     ↓  file_router.py 按粒度分类
-inbox/d/  inbox/w/  inbox/m/
+inbox/d/  inbox/w/  inbox/m/  （含品类子目录）
     ↓  pipeline_runner.py 触发清洗
 exports/captured=YYYY-MM-DD/
     ├── raw/        标准命名原始 xlsx

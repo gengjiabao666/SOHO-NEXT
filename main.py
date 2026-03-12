@@ -26,10 +26,10 @@ import yaml
 from dotenv import load_dotenv
 
 from browser.session import BrowserSession
-from browser.downloader import download_all
+from browser.downloader import download_all, download_all_v2
 from file_router import route_files
 from pipeline_runner import run_pipeline
-from scheduler.trigger import get_tasks_for_today, run_with_retry
+from scheduler.trigger import get_tasks_for_today, get_detailed_tasks_for_today, run_with_retry, run_with_retry_v2
 from utils.logger import log_node, setup_logger
 
 load_dotenv()
@@ -175,40 +175,60 @@ async def main():
         python=sys.executable,
     )
 
-    # 确定本次需要下载的粒度
+    # 确定本次需要下载的任务
     if args.wins:
+        # 手动指定粒度，使用旧接口（全品类）
         wins = [w.strip() for w in args.wins.split(",") if w.strip() in ("d", "w", "m")]
+        if not wins:
+            log_node("今天没有需要执行的任务", level="INFO")
+            return
+        log_node("本次任务（手动指定）", level="INFO", wins=wins, captured=captured)
+        use_v2 = False
     else:
-        wins = get_tasks_for_today(captured)
-
-    if not wins:
-        log_node("今天没有需要执行的任务", level="INFO")
-        return
-
-    log_node("本次任务", level="INFO", wins=wins, captured=captured)
+        # 自动调度，使用新接口（支持品类筛选）
+        tasks = get_detailed_tasks_for_today(captured)
+        if not tasks:
+            log_node("今天没有需要执行的任务", level="INFO")
+            return
+        use_v2 = True
 
     # 演练模式
     if dry_run:
-        tasks_yaml = os.getenv("TASKS_YAML", "config/tasks.yaml")
-        with open(tasks_yaml, encoding="utf-8") as f:
-            config = yaml.safe_load(f)
-        for module in config["modules"]:
-            for win in wins:
-                if win in module.get("wins", []):
-                    log_node("[DRY-RUN] 将下载", level="INFO",
-                             module=module["name"], win=win)
+        if use_v2:
+            for t in tasks:
+                cat_label = t["category"] if t["category"] else "全品类"
+                log_node("[DRY-RUN] 将下载", level="INFO",
+                         module=t["module"], win=t["win"], category=cat_label)
+        else:
+            tasks_yaml = os.getenv("TASKS_YAML", "config/tasks.yaml")
+            with open(tasks_yaml, encoding="utf-8") as f:
+                config = yaml.safe_load(f)
+            for module in config["modules"]:
+                for win in wins:
+                    if win in module.get("wins", []):
+                        log_node("[DRY-RUN] 将下载", level="INFO",
+                                 module=module["name"], win=win)
         log_node("演练完成，退出", level="DONE")
         return
 
     # 正式运行
-    success = await run_with_retry(
-        wins=wins,
-        captured=captured,
-        download_fn=download_all,
-        route_fn=route_files,
-        pipeline_fn=run_pipeline,
-        module_filter=args.module,
-    )
+    if use_v2:
+        success = await run_with_retry_v2(
+            tasks=tasks,
+            captured=captured,
+            download_fn=download_all_v2,
+            route_fn=route_files,
+            pipeline_fn=run_pipeline,
+        )
+    else:
+        success = await run_with_retry(
+            wins=wins,
+            captured=captured,
+            download_fn=download_all,
+            route_fn=route_files,
+            pipeline_fn=run_pipeline,
+            module_filter=args.module,
+        )
 
     if success:
         log_node("本日采集全部完成", level="DONE", captured=captured)

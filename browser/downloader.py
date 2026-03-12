@@ -36,6 +36,7 @@ from browser.session import BrowserSession
 from utils.freshness import is_fresh
 from utils.logger import log_node
 from utils.notifier import _notify
+from utils.quota import record_export, check_quota_warning
 from utils.retry import async_retry
 
 load_dotenv()
@@ -54,6 +55,7 @@ class DownloadResult:
     status:   str           # "success" / "stale" / "failed"
     tmp_path: Optional[Path] = None
     reason:   str = ""
+    category: str = ""      # 品类（空字符串表示全品类）
 
 
 def _load_tasks() -> list:
@@ -258,6 +260,65 @@ async def _wait_for_data(page: Page, module_name: str, win: str):
     await _screenshot(page, f"{module_name}_{win}_loaded")
 
 
+async def _select_category(page: Page, category: str, module_name: str, win: str):
+    """
+    选择商品品类
+
+    流程：
+        1. 找到 Product Category 筛选器
+        2. 点击 More 展开全部品类
+        3. 点击目标品类
+    """
+    # 等待筛选器出现
+    try:
+        await page.wait_for_selector("text=Product Category", state="visible", timeout=10_000)
+    except Exception:
+        log_node("未找到 Product Category 筛选器", level="WARN",
+                 module=module_name, category=category)
+        return
+
+    await page.wait_for_timeout(2_000)
+
+    # 点击 More 展开全部品类
+    more_selectors = [
+        ":has-text('Product Category') >> text=More",
+        "text=/More\\s*[∨▼]/",
+        "button:has-text('More')",
+    ]
+    for sel in more_selectors:
+        try:
+            loc = page.locator(sel).first
+            if await loc.is_visible():
+                await loc.click(timeout=5_000)
+                log_node("More 按钮已点击", level="INFO", module=module_name)
+                await page.wait_for_timeout(2_000)
+                break
+        except Exception:
+            continue
+
+    await _check_subscription_expired(page)
+
+    # 点击目标品类
+    category_selectors = [
+        f"button:has-text('{category}')",
+        f":has-text('Product Category') >> :has-text('{category}')",
+        f"text={category}",
+    ]
+    for sel in category_selectors:
+        try:
+            loc = page.locator(sel).first
+            if await loc.is_visible():
+                await loc.scroll_into_view_if_needed(timeout=3_000)
+                await loc.click(timeout=5_000)
+                log_node(f"品类已选择: {category}", level="INFO", module=module_name)
+                await page.wait_for_timeout(3_000)
+                return
+        except Exception:
+            continue
+
+    log_node(f"品类选择失败: {category}", level="WARN", module=module_name)
+
+
 async def download_all(
     wins: list[str],
     captured: str,
@@ -265,6 +326,7 @@ async def download_all(
     page: Page,
     module_filter: str = "",
 ) -> List[DownloadResult]:
+    """旧接口：按 wins 列表下载全品类"""
     modules = _load_tasks()
     results = []
     TMP_DIR.mkdir(parents=True, exist_ok=True)
@@ -275,8 +337,44 @@ async def download_all(
         for win in wins:
             if win not in module.get("wins", []):
                 continue
-            result = await _download_one(page, module, win, captured)
+            result = await _download_one(page, module, win, captured, category="")
             results.append(result)
+
+    return results
+
+
+async def download_all_v2(
+    tasks: list[dict],
+    captured: str,
+    session: BrowserSession,
+    page: Page,
+) -> List[DownloadResult]:
+    """
+    新接口：按详细任务列表下载（支持品类筛选）
+
+    参数：
+        tasks: 任务列表，每个任务包含 {module, win, category}
+    """
+    modules_config = {m["name"]: m for m in _load_tasks()}
+    results = []
+    TMP_DIR.mkdir(parents=True, exist_ok=True)
+
+    for task in tasks:
+        module_name = task["module"]
+        win = task["win"]
+        category = task.get("category", "")
+
+        if module_name not in modules_config:
+            log_node(f"未知模块: {module_name}", level="WARN")
+            continue
+
+        module = modules_config[module_name]
+        if win not in module.get("wins", []):
+            log_node(f"模块 {module_name} 不支持 {win}", level="WARN")
+            continue
+
+        result = await _download_one(page, module, win, captured, category=category)
+        results.append(result)
 
     return results
 
@@ -287,6 +385,7 @@ async def _download_one(
     module: dict,
     win: str,
     captured: str,
+    category: str = "",
 ) -> DownloadResult:
     module_name         = module["name"]
     nav_parent_selector = module["nav_parent_selector"]  # 一级菜单展开箭头
@@ -296,9 +395,16 @@ async def _download_one(
     time_tab            = time_tab_map.get(win, "")      # 日榜为空（默认选中）
     export_count        = module.get("export_count", "200 Records")
     ds                  = module.get("ds", "p")
+    has_category_filter = module.get("has_category_filter", False)
+
+    # 任务标签（用于日志和文件命名）
+    task_label = f"{module_name}_{win}"
+    if category:
+        task_label += f"_{category}"
 
     log_node("开始下载", level="INFO",
-             module=module_name, win=win, export_count=export_count)
+             module=module_name, win=win, category=category or "全品类",
+             export_count=export_count)
 
     # ══════════════════════════════════════════
     # 步骤1：侧边栏导航（基于 Playwright 录制的精确选择器）
@@ -343,7 +449,7 @@ async def _download_one(
             await _check_subscription_expired(page)
         except Exception as e:
             await _screenshot(page, f"{module_name}_{win}_nav_fail")
-            return DownloadResult(module=module_name, win=win,
+            return DownloadResult(module=module_name, win=win, category=category,
                                   status="failed",
                                   reason=f"一级菜单展开失败: {str(e)[:60]}")
 
@@ -362,7 +468,7 @@ async def _download_one(
         await _check_subscription_expired(page)
     except Exception as e:
         await _screenshot(page, f"{module_name}_{win}_nav_fail")
-        return DownloadResult(module=module_name, win=win,
+        return DownloadResult(module=module_name, win=win, category=category,
                               status="failed",
                               reason=f"二级菜单点击失败: {str(e)[:60]}")
 
@@ -382,16 +488,24 @@ async def _download_one(
     )
     if status in ("captcha", "blocked"):
         await _screenshot(page, f"{module_name}_{win}_anomaly")
-        return DownloadResult(module=module_name, win=win,
+        return DownloadResult(module=module_name, win=win, category=category,
                               status="failed", reason=reason)
     if status == "error":
         log_node("页面错误，标记failed等待重试", level="WARN",
                  module=module_name, reason=reason)
         await _screenshot(page, f"{module_name}_{win}_error")
-        return DownloadResult(module=module_name, win=win,
+        return DownloadResult(module=module_name, win=win, category=category,
                               status="failed", reason=reason)
 
     log_node("页面状态正常", level="INFO", module=module_name)
+
+    # ══════════════════════════════════════════
+    # 步骤3.5：品类筛选（如果指定了品类）
+    # ══════════════════════════════════════════
+    if category and has_category_filter:
+        log_node(f"选择品类: {category}", level="INFO", module=module_name)
+        await _select_category(page, category, module_name, win)
+        await _screenshot(page, f"{task_label}_category_selected")
 
     # ══════════════════════════════════════════
     # 步骤4：点击时间 Tab（日榜为默认，跳过）
@@ -484,7 +598,7 @@ async def _download_one(
                 await popup_page.close()
             except Exception:
                 pass
-            return DownloadResult(module=module_name, win=win,
+            return DownloadResult(module=module_name, win=win, category=category,
                                   status="failed",
                                   reason=f"导出受限: {popup_body[:100]}")
     else:
@@ -516,7 +630,7 @@ async def _download_one(
                     await popup_page.close()
                 except Exception:
                     pass
-                return DownloadResult(module=module_name, win=win,
+                return DownloadResult(module=module_name, win=win, category=category,
                                       status="failed",
                                       reason=f"导出受限: {popup_body[:100]}")
         except Exception as e:
@@ -577,7 +691,7 @@ async def _download_one(
             log_node("API 返回 HTML 错误页而非 xlsx", level="ERROR",
                      module=module_name, content_type=content_type,
                      body=body_text[:200])
-            return DownloadResult(module=module_name, win=win,
+            return DownloadResult(module=module_name, win=win, category=category,
                                   status="failed",
                                   reason=f"API返回HTML错误页: {body_text[:100]}")
         # 从 Content-Disposition 提取文件名，兜底用模块名
@@ -597,6 +711,14 @@ async def _download_one(
              module=module_name, win=win,
              file=orig_name, size=f"{size_kb:.1f}KB")
 
+    # 记录配额（从 "200 Records" 提取数字）
+    try:
+        count_num = int(export_count.split()[0])
+        record_export(task=f"{module_name}_{win}", count=count_num)
+        check_quota_warning()
+    except Exception:
+        pass  # 解析失败不影响主流程
+
     # ══════════════════════════════════════════
     # 步骤7：新鲜度检测
     # ══════════════════════════════════════════
@@ -604,10 +726,10 @@ async def _download_one(
     if not fresh:
         log_node("数据未更新（MD5与历史文件相同）", level="WARN",
                  module=module_name, win=win)
-        return DownloadResult(module=module_name, win=win,
+        return DownloadResult(module=module_name, win=win, category=category,
                               status="stale", tmp_path=tmp_path)
 
     log_node("数据已更新，文件准备就绪", level="INFO",
              module=module_name, win=win)
-    return DownloadResult(module=module_name, win=win,
+    return DownloadResult(module=module_name, win=win, category=category,
                           status="success", tmp_path=tmp_path)

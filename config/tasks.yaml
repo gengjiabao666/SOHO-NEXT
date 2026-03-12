@@ -8,6 +8,15 @@
 # export_count:        导出条数文字（如 "200 Records"）
 # ============================================================
 
+# 品类配置
+# name 为空字符串表示全品类（不筛选）
+categories:
+  - name: ""
+    enabled: true
+  - name: "Pet Supplies"
+    enabled: true
+
+# 模块配置
 modules:
 
   - name: 商品榜
@@ -17,10 +26,22 @@ modules:
     wins: [d, w, m]
     ds: p
     time_tab_map:
-      d: ""           # Daily 是默认选中，不需要点击
+      d: ""
       w: "Weekly"
       m: "Monthly"
     export_count: "200 Records"
+    has_category_filter: true
+
+  - name: 新品榜
+    nav_parent_selector: "div:nth-child(3) > .arco-menu-inline-header > .arco-menu-icon-suffix > .arco-icon"
+    submenu_id: "arco-menu-0-submenu-inline-1"
+    nav_child: "New Products"
+    wins: [d]
+    ds: pn
+    time_tab_map:
+      d: ""
+    export_count: "200 Records"
+    has_category_filter: true
 
   - name: 小店榜
     nav_parent_selector: "div:nth-child(4) > .arco-menu-inline-header > .arco-menu-icon-suffix > .arco-icon"
@@ -29,7 +50,30 @@ modules:
     wins: [d, w, m]
     ds: s
     time_tab_map:
-      d: ""           # Daily 是默认选中，不需要点击
+      d: ""
       w: "Weekly"
       m: "Monthly"
     export_count: "200 Records"
+    has_category_filter: true
+
+# 调度规则
+# daily: 每天采集日榜的模块
+# weekly: 周几采集哪些模块的周榜（monday=周一, tuesday=周二, ...）
+# monthly: 几号采集哪些模块的月榜（day_1=1号, day_2=2号, ...）
+schedule:
+  daily:
+    - 商品榜
+    - 新品榜
+    - 小店榜
+
+  weekly:
+    monday:
+      - 商品榜
+    tuesday:
+      - 小店榜
+
+  monthly:
+    day_1:
+      - 商品榜
+    day_2:
+      - 小店榜

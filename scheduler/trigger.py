@@ -149,24 +149,112 @@ def _get_proxy_settings() -> dict | None:
 
 def get_tasks_for_today(captured: str = None) -> list[str]:
     """
-    根据日期决定本次执行哪些粒度
+    根据日期决定本次执行哪些粒度（旧接口，保持兼容）
 
     规则：
         d（日榜）- 每天执行
-        w（周榜）- 每周一执行
-        m（月榜）- 每月1日执行
+        w（周榜）- 每周一/周二执行（周一商品榜，周二小店榜）
+        m（月榜）- 每月1/2日执行（1号商品榜，2号小店榜）
 
     返回：
         粒度列表，如 ["d"] 或 ["d", "w"] 或 ["d", "m"]
     """
     d = date.fromisoformat(captured) if captured else date.today()
     wins = ["d"]
-    if d.weekday() == 0:   # 周一
+    if d.weekday() in (0, 1):   # 周一或周二
         wins.append("w")
-    if d.day == 1:         # 每月1日
+    if d.day in (1, 2):         # 1号或2号
         wins.append("m")
     log_node("本日任务调度", level="INFO", date=str(d), wins=wins)
     return wins
+
+
+def get_detailed_tasks_for_today(captured: str = None) -> list[dict]:
+    """
+    根据日期和 tasks.yaml 配置决定本次执行哪些任务
+
+    返回：
+        任务列表，每个任务包含 {module, win, category}
+    """
+    import yaml
+    from pathlib import Path
+
+    d = date.fromisoformat(captured) if captured else date.today()
+    weekday = d.weekday()  # 0=周一, 1=周二, ...
+    day_of_month = d.day
+
+    # 加载配置
+    config_path = Path(__file__).parent.parent / "config" / "tasks.yaml"
+    with open(config_path, "r", encoding="utf-8") as f:
+        config = yaml.safe_load(f)
+
+    categories = [c["name"] for c in config.get("categories", []) if c.get("enabled", True)]
+    modules = {m["name"]: m for m in config.get("modules", [])}
+    schedule = config.get("schedule", {})
+
+    tasks = []
+
+    # 日榜：每天采集
+    daily_modules = schedule.get("daily", [])
+    for module_name in daily_modules:
+        if module_name not in modules:
+            continue
+        module = modules[module_name]
+        if "d" not in module.get("wins", []):
+            continue
+        for category in categories:
+            # 全品类或该模块支持品类筛选
+            if category == "" or module.get("has_category_filter", False):
+                tasks.append({
+                    "module": module_name,
+                    "win": "d",
+                    "category": category,
+                })
+
+    # 周榜：根据星期几决定采集哪些模块
+    weekly_schedule = schedule.get("weekly", {})
+    weekday_map = {0: "monday", 1: "tuesday", 2: "wednesday", 3: "thursday",
+                   4: "friday", 5: "saturday", 6: "sunday"}
+    weekday_key = weekday_map.get(weekday, "")
+    weekly_modules = weekly_schedule.get(weekday_key, [])
+    for module_name in weekly_modules:
+        if module_name not in modules:
+            continue
+        module = modules[module_name]
+        if "w" not in module.get("wins", []):
+            continue
+        for category in categories:
+            if category == "" or module.get("has_category_filter", False):
+                tasks.append({
+                    "module": module_name,
+                    "win": "w",
+                    "category": category,
+                })
+
+    # 月榜：根据日期决定采集哪些模块
+    monthly_schedule = schedule.get("monthly", {})
+    day_key = f"day_{day_of_month}"
+    monthly_modules = monthly_schedule.get(day_key, [])
+    for module_name in monthly_modules:
+        if module_name not in modules:
+            continue
+        module = modules[module_name]
+        if "m" not in module.get("wins", []):
+            continue
+        for category in categories:
+            if category == "" or module.get("has_category_filter", False):
+                tasks.append({
+                    "module": module_name,
+                    "win": "m",
+                    "category": category,
+                })
+
+    log_node("本日详细任务调度", level="INFO", date=str(d), task_count=len(tasks))
+    for t in tasks:
+        cat_label = t["category"] if t["category"] else "全品类"
+        log_node(f"  - {t['module']}_{t['win']} ({cat_label})", level="INFO")
+
+    return tasks
 
 
 async def run_with_retry(
@@ -189,6 +277,12 @@ async def run_with_retry(
     返回：
         True = 全部成功，False = 最终失败
     """
+    # 检测账号变更并输出使用状态
+    from utils.account_tracker import check_account_change, log_account_status, check_account_expiry
+    check_account_change()
+    log_account_status()
+    check_account_expiry()
+
     proxy = _get_proxy_settings()
 
     # 读取账号列表
@@ -310,6 +404,177 @@ async def run_with_retry(
                          level="WARN",
                          stale=[f"{r.module}/{r.win}" for r in stale_list],
                          failed=[f"{r.module}/{r.win}" for r in failed_list])
+                break  # 跳出 attempt 循环
+
+        # ── 所有账号都用完：通知失败 ──
+        log_node("所有账号均已尝试，发送失败通知", level="ERROR")
+        notify_final_failure(
+            captured=captured,
+            stale=[],
+            failed=[f"全部 {total_accounts} 个账号均失败"],
+        )
+
+        return False
+
+
+async def run_with_retry_v2(
+    tasks: list[dict],
+    captured: str,
+    download_fn: Callable,
+    route_fn: Callable,
+    pipeline_fn: Callable,
+    max_attempts: int = 2,
+) -> bool:
+    """
+    下载流程 V2（支持详细任务列表，包含品类筛选）
+
+    参数：
+        tasks: 任务列表，每个任务包含 {module, win, category}
+
+    流程：
+        账号A → 尝试1 → 尝试2 → 失败 → 换账号B → 尝试1 → 尝试2 → ...
+        任一账号全部成功 → route → pipeline → 通知成功 → 结束
+        所有账号都用完 → 通知失败 → 结束
+
+    返回：
+        True = 全部成功，False = 最终失败
+    """
+    # 检测账号变更并输出使用状态
+    from utils.account_tracker import check_account_change, log_account_status, check_account_expiry
+    check_account_change()
+    log_account_status()
+    check_account_expiry()
+
+    proxy = _get_proxy_settings()
+
+    # 读取账号列表
+    accounts_str  = os.getenv("ECHOTIK_ACCOUNTS", "")
+    passwords_str = os.getenv("ECHOTIK_PASSWORDS", "")
+    accounts  = [a.strip().strip('"').strip("'")
+                 for a in accounts_str.split(",") if a.strip()]
+    passwords = [p.strip().strip('"').strip("'")
+                 for p in passwords_str.split(",") if p.strip()]
+    if not accounts:
+        log_node("未配置账号", level="ERROR")
+        return False
+
+    total_accounts = len(accounts)
+
+    async def _launch_browser(pw):
+        """启动浏览器，返回 (browser, context, page, session)"""
+        browser = await pw.chromium.launch(
+            headless=True,
+            proxy=proxy,
+        )
+        context = await browser.new_context(
+            viewport={"width": 1440, "height": 900},
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
+        )
+        page    = await context.new_page()
+        session = BrowserSession(context)
+        return browser, context, page, session
+
+    async with async_playwright() as pw:
+        all_routed = []  # 跨账号累积已成功路由的结果
+
+        for acct_idx in range(total_accounts):
+            acct = accounts[acct_idx]
+            pwd  = passwords[acct_idx] if acct_idx < len(passwords) else ""
+            acct_masked = acct[:3] + "***@" + acct.split("@")[-1] if "@" in acct else acct[:3] + "***"
+
+            log_node(f"切换到账号 {acct_idx + 1}/{total_accounts}",
+                     level="START", account=acct_masked)
+
+            pending_tasks = tasks[:]
+
+            for attempt in range(1, max_attempts + 1):
+
+                log_node(f"账号 {acct_idx + 1} 第 {attempt}/{max_attempts} 次尝试：启动浏览器",
+                         level="START", account=acct_masked,
+                         task_count=len(pending_tasks), captured=captured)
+
+                browser, context, page, session = await _launch_browser(pw)
+
+                # 指定使用当前账号登录
+                session.set_single_account(acct, pwd)
+
+                try:
+                    await session.ensure_login(page)
+                except RuntimeError as e:
+                    log_node("登录失败，尝试下一个账号",
+                             level="WARN", account=acct_masked, error=str(e)[:80])
+                    await browser.close()
+                    break  # 跳出 attempt 循环，换下一个账号
+
+                results = await download_fn(
+                    tasks=pending_tasks,
+                    captured=captured,
+                    session=session,
+                    page=page,
+                )
+
+                await browser.close()
+                log_node("浏览器已关闭", level="INFO",
+                         account=acct_masked, attempt=attempt)
+
+                success_list = [r for r in results if r.status == "success"]
+                stale_list   = [r for r in results if r.status == "stale"]
+                failed_list  = [r for r in results if r.status == "failed"]
+
+                log_node(f"账号 {acct_idx + 1} 第 {attempt} 次尝试结果",
+                         level="INFO",
+                         account=acct_masked,
+                         success=len(success_list),
+                         stale=len(stale_list),
+                         failed=len(failed_list))
+
+                if success_list:
+                    route_fn(success_list)
+                    all_routed.extend(success_list)
+
+                # ── 全部成功 ──
+                if not stale_list and not failed_list:
+                    pipeline_fn(captured)
+                    # 构建成功任务描述
+                    success_desc = []
+                    for r in all_routed:
+                        cat_label = f"/{r.category}" if r.category else ""
+                        success_desc.append(f"{r.module}/{r.win}{cat_label}")
+                    notify_success(
+                        captured=captured,
+                        success=success_desc,
+                        attempt=attempt,
+                    )
+                    return True
+
+                # ── 还有重试机会（同一账号）──
+                if attempt < max_attempts:
+                    # 重新构建待重试任务列表
+                    failed_tasks = []
+                    for r in stale_list + failed_list:
+                        failed_tasks.append({
+                            "module": r.module,
+                            "win": r.win,
+                            "category": r.category,
+                        })
+                    log_node(
+                        f"部分任务未完成，同账号第 {attempt + 1} 次重试",
+                        level="WARN",
+                        account=acct_masked,
+                        failed_count=len(failed_tasks),
+                    )
+                    pending_tasks = failed_tasks
+                    continue
+
+                # ── 当前账号重试耗尽，换下一个账号 ──
+                log_node(f"账号 {acct_masked} 重试 {max_attempts} 次仍失败，尝试下一个账号",
+                         level="WARN",
+                         stale=len(stale_list),
+                         failed=len(failed_list))
                 break  # 跳出 attempt 循环
 
         # ── 所有账号都用完：通知失败 ──

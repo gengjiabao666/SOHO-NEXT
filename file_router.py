@@ -35,9 +35,14 @@ def route_files(results: list) -> dict:
                  .win      "d" / "w" / "m"
                  .tmp_path 下载到的临时文件路径（Path 对象）
                  .module   模块名称
+                 .category 品类（空字符串表示全品类）
 
     返回：
         {"success": [...], "skipped": [...], "failed": [...]}
+
+    路由规则：
+        全品类：inbox/d/xxx.xlsx
+        Pet Supplies：inbox/d/pet_supplies/xxx.xlsx
     """
     summary = {"success": [], "skipped": [], "failed": []}
 
@@ -48,7 +53,16 @@ def route_files(results: list) -> dict:
             summary["skipped"].append(str(r.tmp_path))
             continue
 
+        # 确定目标目录
         dest_dir = INBOX_ROOT / r.win
+
+        # 如果有品类，放到品类子目录
+        category = getattr(r, "category", "")
+        if category:
+            # 将品类名转换为目录名（小写，空格转下划线）
+            category_dir = category.lower().replace(" ", "_")
+            dest_dir = dest_dir / category_dir
+
         dest_dir.mkdir(parents=True, exist_ok=True)
 
         dest_path = dest_dir / r.tmp_path.name
@@ -59,7 +73,8 @@ def route_files(results: list) -> dict:
         try:
             shutil.move(str(r.tmp_path), str(dest_path))
             log_node("文件已路由到 inbox", level="INFO",
-                     module=r.module, win=r.win, dest=str(dest_path))
+                     module=r.module, win=r.win,
+                     category=category or "全品类", dest=str(dest_path))
             summary["success"].append(str(dest_path))
         except Exception as e:
             log_node("文件路由失败", level="ERROR",

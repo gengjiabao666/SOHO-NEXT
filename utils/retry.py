@@ -7,23 +7,35 @@ utils/retry.py
 功能：
     指数退避重试，适用于网络请求和页面操作。
     第1次失败等 base_delay 秒，第2次等 2*base_delay，以此类推。
+    支持指定不重试的异常类型（如订阅到期异常）。
 """
 
 import asyncio
 import functools
+from typing import Tuple, Type
 from utils.logger import log_node
 
 
-def async_retry(max_attempts: int = 3, base_delay: float = 30.0):
+def async_retry(
+    max_attempts: int = 3,
+    base_delay: float = 30.0,
+    no_retry_exceptions: Tuple[Type[Exception], ...] = ()
+):
     """
     异步函数重试装饰器
 
     参数：
         max_attempts: 最大尝试次数（含首次）
         base_delay:   首次重试等待秒数（后续倍增）
+        no_retry_exceptions: 不重试的异常类型元组，遇到这些异常直接抛出
 
     用法：
         @async_retry(max_attempts=3, base_delay=30.0)
+        async def my_func():
+            ...
+
+        # 指定不重试的异常
+        @async_retry(max_attempts=3, no_retry_exceptions=(SubscriptionExpiredError,))
         async def my_func():
             ...
     """
@@ -34,6 +46,9 @@ def async_retry(max_attempts: int = 3, base_delay: float = 30.0):
             for attempt in range(1, max_attempts + 1):
                 try:
                     return await func(*args, **kwargs)
+                except no_retry_exceptions:
+                    # 不重试的异常，直接抛出
+                    raise
                 except Exception as e:
                     last_exc = e
                     if attempt < max_attempts:

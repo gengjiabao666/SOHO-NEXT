@@ -42,7 +42,7 @@ def run_pipeline(captured: str = None) -> bool:
 
     pipeline_script = os.getenv(
         "PIPELINE_SCRIPT",
-        "/home/gjb/workspace/echotik_pipeline.py",
+        "/home/gjb/workspace/echotik_pipeline/echotik_pipeline.py",
     ).strip()
 
     repo_root = os.getenv("REPO_ROOT", "/mnt/g/SOHO_repo").strip()
