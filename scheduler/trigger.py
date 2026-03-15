@@ -17,6 +17,7 @@ from typing import Callable
 from playwright.async_api import async_playwright
 
 from browser.session import BrowserSession
+from browser.downloader import SubscriptionExpiredError
 from utils.logger import log_node
 from utils.notifier import notify_final_failure, notify_success
 
@@ -348,13 +349,20 @@ async def run_with_retry(
                     await browser.close()
                     break  # 跳出 attempt 循环，换下一个账号
 
-                results = await download_fn(
-                    wins=pending_wins,
-                    captured=captured,
-                    session=session,
-                    page=page,
-                    module_filter=module_filter,
-                )
+                try:
+                    results = await download_fn(
+                        wins=pending_wins,
+                        captured=captured,
+                        session=session,
+                        page=page,
+                        module_filter=module_filter,
+                        account=acct,
+                    )
+                except SubscriptionExpiredError as e:
+                    log_node("账号订阅到期，自动切换下一个账号",
+                             level="WARN", account=acct_masked)
+                    await browser.close()
+                    break  # 跳出 attempt 循环，换下一个账号
 
                 await browser.close()
                 log_node("浏览器已关闭", level="INFO",
@@ -510,12 +518,19 @@ async def run_with_retry_v2(
                     await browser.close()
                     break  # 跳出 attempt 循环，换下一个账号
 
-                results = await download_fn(
-                    tasks=pending_tasks,
-                    captured=captured,
-                    session=session,
-                    page=page,
-                )
+                try:
+                    results = await download_fn(
+                        tasks=pending_tasks,
+                        captured=captured,
+                        session=session,
+                        page=page,
+                        account=acct,
+                    )
+                except SubscriptionExpiredError as e:
+                    log_node("账号订阅到期，自动切换下一个账号",
+                             level="WARN", account=acct_masked)
+                    await browser.close()
+                    break  # 跳出 attempt 循环，换下一个账号
 
                 await browser.close()
                 log_node("浏览器已关闭", level="INFO",

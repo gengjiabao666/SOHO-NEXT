@@ -210,15 +210,34 @@ def notify_quota_warning(total: int, threshold: int):
 # 账号到期警报
 # ============================================================
 
-def notify_account_expired(today: str, days: int):
-    """账号到期警报"""
+def notify_account_expiring(account: str, days: int):
+    """账号即将到期提醒（第3天）"""
+    # 脱敏
+    masked = account[:3] + "***" + account[-6:-4] if len(account) > 6 else account[:2] + "***"
     content = (
-        f"当前日期：{today}\n"
-        f"账号已使用：{days} 天\n"
-        f"Echotik 账号已到期，请添加新账号。"
+        f"账号：{masked}\n"
+        f"已使用：{days} 天\n"
+        f"该账号明天到期，请添加新账号到号池。"
     )
-    log_node("发送账号到期警报", level="WARN")
-    _notify("⚠️ Echotik 账号已到期", content)
+    log_node("发送账号即将到期提醒", level="WARN", account=masked)
+    _notify("⏰ Echotik 账号明天到期", content)
+
+
+def notify_account_expired(account: str, days: int):
+    """账号已过期并从号池移除通知"""
+    # 脱敏
+    if isinstance(account, str) and "@" in account:
+        masked = account[:3] + "***" + account[-6:-4] if len(account) > 6 else account[:2] + "***"
+    else:
+        masked = str(account)  # 兼容旧调用（传入 today 字符串）
+    content = (
+        f"账号：{masked}\n"
+        f"已使用：{days} 天\n"
+        f"该账号已过期并从号池移除。\n"
+        f"请确保号池中还有可用账号。"
+    )
+    log_node("发送账号过期移除通知", level="WARN", account=masked)
+    _notify("❌ Echotik 账号已过期移除", content)
 
 
 # ============================================================

@@ -38,6 +38,14 @@ from utils.logger import log_node
 from utils.notifier import _notify
 from utils.quota import record_export, check_quota_warning
 from utils.retry import async_retry
+from utils.account_tracker import mark_account_expired
+
+
+class SubscriptionExpiredError(Exception):
+    """账号订阅到期异常"""
+    def __init__(self, account: str):
+        self.account = account
+        super().__init__(f"账号 {account} 订阅已到期")
 
 load_dotenv()
 
@@ -75,14 +83,14 @@ async def _screenshot(page: Page, label: str):
         log_node("截图失败", level="WARN", error=str(e)[:60])
 
 
-async def _check_subscription_expired(page: Page):
+async def _check_subscription_expired(page: Page, account: str = ""):
     """
     检测 Echotik 账号订阅到期弹窗。
 
     弹窗特征：包含 "Current free version" 或 "Upgrade for more privileges" 文本。
     只要账号过期，页面上任何操作都会弹出此提示。
 
-    检测到后：截图存证 → 发送告警 → 终止进程。
+    检测到后：截图存证 → 标记账号过期 → 抛出异常。
     """
     try:
         body_text = await page.inner_text("body", timeout=2_000)
@@ -92,12 +100,13 @@ async def _check_subscription_expired(page: Page):
     if "Current free version" in body_text or "Upgrade for more privileges" in body_text:
         await _screenshot(page, "subscription_expired")
         log_node("Echotik账号到期，请检查账号池", level="ERROR")
-        _notify(
-            "❌ Echotik 账号到期",
-            "检测到订阅到期弹窗（Current free version），本次采集终止。\n"
-            "请更换账号或续费后重试。",
-        )
-        sys.exit(1)
+
+        # 标记账号过期并从号池移除
+        if account:
+            mark_account_expired(account)
+
+        # 抛出异常让上层处理
+        raise SubscriptionExpiredError(account)
 
 
 async def _debug_screenshot_sequence(page: Page, label: str,
@@ -112,7 +121,7 @@ async def _debug_screenshot_sequence(page: Page, label: str,
 
 
 async def _click_by_text(page: Page, text: str, timeout: int = 8_000,
-                         desc: str = "") -> bool:
+                         desc: str = "", account: str = "") -> bool:
     """
     点击页面上包含指定文字的元素，多种选择器依次尝试。
     返回 True=成功，False=失败。
@@ -132,7 +141,7 @@ async def _click_by_text(page: Page, text: str, timeout: int = 8_000,
             log_node(f"点击成功: {desc or text}", level="INFO",
                      text=text, selector=sel)
             await page.wait_for_timeout(1_000)
-            await _check_subscription_expired(page)
+            await _check_subscription_expired(page, account)
             return True
         except Exception:
             continue
@@ -141,7 +150,7 @@ async def _click_by_text(page: Page, text: str, timeout: int = 8_000,
 
 
 async def _click_by_text_enhanced(page: Page, text: str, timeout: int = 10_000,
-                                   desc: str = "") -> bool:
+                                   desc: str = "", account: str = "") -> bool:
     """
     增强版文字点击，使用更多策略和调试信息
     """
@@ -190,7 +199,7 @@ async def _click_by_text_enhanced(page: Page, text: str, timeout: int = 10_000,
             log_node(f"点击成功: {desc or text}", level="INFO",
                      text=text, selector=sel, attempt=f"{i+1}/{len(selectors)}")
             await page.wait_for_timeout(1_000)
-            await _check_subscription_expired(page)
+            await _check_subscription_expired(page, account)
             return True
 
         except Exception as e:
@@ -296,7 +305,7 @@ async def _select_category(page: Page, category: str, module_name: str, win: str
         except Exception:
             continue
 
-    await _check_subscription_expired(page)
+    await _check_subscription_expired(page, account)
 
     # 点击目标品类
     category_selectors = [
@@ -325,6 +334,7 @@ async def download_all(
     session: BrowserSession,
     page: Page,
     module_filter: str = "",
+    account: str = "",
 ) -> List[DownloadResult]:
     """旧接口：按 wins 列表下载全品类"""
     modules = _load_tasks()
@@ -337,7 +347,7 @@ async def download_all(
         for win in wins:
             if win not in module.get("wins", []):
                 continue
-            result = await _download_one(page, module, win, captured, category="")
+            result = await _download_one(page, module, win, captured, category="", account=account)
             results.append(result)
 
     return results
@@ -348,6 +358,7 @@ async def download_all_v2(
     captured: str,
     session: BrowserSession,
     page: Page,
+    account: str = "",
 ) -> List[DownloadResult]:
     """
     新接口：按详细任务列表下载（支持品类筛选）
@@ -373,7 +384,7 @@ async def download_all_v2(
             log_node(f"模块 {module_name} 不支持 {win}", level="WARN")
             continue
 
-        result = await _download_one(page, module, win, captured, category=category)
+        result = await _download_one(page, module, win, captured, category=category, account=account)
         results.append(result)
 
     return results
@@ -386,6 +397,7 @@ async def _download_one(
     win: str,
     captured: str,
     category: str = "",
+    account: str = "",
 ) -> DownloadResult:
     module_name         = module["name"]
     nav_parent_selector = module["nav_parent_selector"]  # 一级菜单展开箭头
@@ -422,7 +434,7 @@ async def _download_one(
             await loc.first.click(timeout=3_000)
             log_node("欢迎弹窗已关闭", level="INFO")
             await page.wait_for_timeout(1_000)
-            await _check_subscription_expired(page)
+            await _check_subscription_expired(page, account)
     except Exception:
         pass
 
@@ -446,7 +458,7 @@ async def _download_one(
             await loc.click(timeout=8_000)
             log_node("一级菜单已展开", level="INFO", module=module_name)
             await page.wait_for_timeout(1_000)
-            await _check_subscription_expired(page)
+            await _check_subscription_expired(page, account)
         except Exception as e:
             await _screenshot(page, f"{module_name}_{win}_nav_fail")
             return DownloadResult(module=module_name, win=win, category=category,
@@ -465,7 +477,7 @@ async def _download_one(
         log_node("二级菜单已点击", level="INFO", module=module_name,
                  nav_child=nav_child)
         await page.wait_for_timeout(1_000)
-        await _check_subscription_expired(page)
+        await _check_subscription_expired(page, account)
     except Exception as e:
         await _screenshot(page, f"{module_name}_{win}_nav_fail")
         return DownloadResult(module=module_name, win=win, category=category,
@@ -547,7 +559,7 @@ async def _download_one(
         await dropdown_btn.hover(timeout=8_000)
         log_node("下拉菜单已弹出", level="INFO")
         await page.wait_for_timeout(1_000)
-        await _check_subscription_expired(page)
+        await _check_subscription_expired(page, account)
     except Exception as e:
         log_node("下拉箭头悬停失败，尝试点击",
                  level="WARN", error=str(e)[:60])
@@ -566,7 +578,7 @@ async def _download_one(
         await page.get_by_text(export_count).click(timeout=5_000)
         log_node(f"条数已选择: {export_count}", level="INFO")
         await page.wait_for_timeout(1_000)
-        await _check_subscription_expired(page)
+        await _check_subscription_expired(page, account)
     except Exception as e:
         log_node(f"条数选择失败: {export_count}",
                  level="WARN", error=str(e)[:60])
@@ -611,7 +623,7 @@ async def _download_one(
                     timeout=8_000)
                 log_node("Export 按钮已点击", level="INFO")
                 await page.wait_for_timeout(1_000)
-                await _check_subscription_expired(page)
+                await _check_subscription_expired(page, account)
             popup_page = await popup_info.value
             popup_url = popup_page.url
             log_node("popup 已打开", level="INFO", url=popup_url[:120])
