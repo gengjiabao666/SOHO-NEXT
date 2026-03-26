@@ -33,6 +33,64 @@ from utils.notifier import notify_pipeline_failure, send_files_to_feishu
 from utils.events import write_event, STAGE_PIPELINE_TRIGGER
 
 
+def run_analyst_reports(captured: str, repo_root: str) -> bool:
+    """
+    在采集文件推送完成后，顺序触发 analyst 日报。
+
+    触发范围：
+    1. pet_supplies（宠物子品类）
+    2. overall（总榜，scope 传空字符串）
+
+    返回：
+        bool: 两个 scope 都成功时返回 True；任一失败返回 False。
+    """
+    analyst_python = "/home/ubuntu/miniconda3/envs/echotik_clean/bin/python"
+    analyst_script = Path("/home/ubuntu/workspace/echotik_pipeline/echotik_analyst.py")
+
+    if not analyst_script.exists():
+        log_node("analyst 脚本不存在，跳过日报触发",
+                 level="ERROR", path=str(analyst_script))
+        return False
+
+    if not Path(analyst_python).exists():
+        log_node("analyst Python 解释器不存在，跳过日报触发",
+                 level="ERROR", python_bin=analyst_python)
+        return False
+
+    all_success = True
+    for scope_val, scope_label in [("pet_supplies", "pet_supplies"), ("", "overall")]:
+        log_node("开始触发 analyst 日报",
+                 level="START", captured=captured, scope=scope_label)
+        result = subprocess.run(
+            [analyst_python, str(analyst_script),
+             "--mode", "daily",
+             "--captured", captured,
+             "--root", repo_root,
+             "--scope", scope_val],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            cwd=str(analyst_script.parent),
+        )
+
+        output_lines = (result.stdout or "").strip().splitlines()
+        preview = output_lines[-5:] if len(output_lines) > 5 else output_lines
+
+        if result.returncode == 0:
+            for line in preview:
+                print(f"    [analyst:{scope_label}] {line}")
+            log_node("analyst 日报完成",
+                     level="INFO", captured=captured, scope=scope_label)
+        else:
+            err = (result.stderr or result.stdout or "")[:300]
+            log_node("analyst 日报执行失败",
+                     level="ERROR", captured=captured, scope=scope_label,
+                     stderr_preview=err)
+            all_success = False
+
+    return all_success
+
+
 def run_pipeline(captured: str = None) -> bool:
     """
     触发 echotik_pipeline.py 执行
@@ -181,6 +239,15 @@ def run_pipeline(captured: str = None) -> bool:
         )
         # 调用飞书推送函数，将导出文件发送到指定飞书群
         send_files_to_feishu(captured=captured, exports_dir=exports_dir)
+
+        # --------------------------------------------------
+        # 10. 采集文件推送完成后，再顺序触发 analyst 日报
+        #     这样 analyst 报告会晚于采集文件推送出现
+        # --------------------------------------------------
+        analyst_ok = run_analyst_reports(captured=captured, repo_root=repo_root)
+        if not analyst_ok:
+            log_node("analyst 日报存在失败，请检查 analyst.log 或脚本输出",
+                     level="WARN", captured=captured)
 
         # 返回 True 表示流水线执行成功
         return True
