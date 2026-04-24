@@ -138,6 +138,57 @@ async def _screenshot(page: Page, label: str):
         log_node("截图失败", level="WARN", error=str(e)[:60])
 
 
+async def _dismiss_runtime_popup(page: Page, module_name: str = "", stage: str = "", account: str = "") -> bool:
+    """
+    运行期弹窗/遮罩清理。
+
+    登录后的 dashboard、榜单页、导出页都可能弹出新的引导层、公告层、
+    会员提示层或全屏遮罩。它们会遮挡侧边栏点击，因此在关键点击前需要
+    主动清理一次。
+    """
+    popup_selectors = [
+        "button:has-text('Start Now')",
+        "button:has-text('start now')",
+        "button:has-text('立即开始')",
+        "button:has-text('Got it')",
+        "button:has-text('Close')",
+        "button:has-text('close')",
+        "button:has-text('Continue')",
+        "button:has-text('继续')",
+        "button:has-text('知道了')",
+        "button:has-text('确定')",
+        "button:has-text('我知道了')",
+        "[aria-label='Close']",
+        "[class*='close']",
+        "[class*='Close']",
+        "[class*='modal'] button:last-child",
+        "[class*='dialog'] button:last-child",
+        "[class*='popup'] button",
+    ]
+
+    popup_found = False
+    for sel in popup_selectors:
+        try:
+            loc = page.locator(sel)
+            if await loc.count() <= 0:
+                continue
+            if await loc.first.is_visible():
+                await loc.first.click(timeout=3_000)
+                popup_found = True
+                log_node("运行期弹窗已关闭", level="INFO",
+                         module=module_name, stage=stage, selector=sel)
+                await page.wait_for_timeout(1200)
+                await _check_subscription_expired(page, account)
+                break
+        except Exception as e:
+            log_node("运行期弹窗关闭失败", level="DEBUG",
+                     module=module_name, stage=stage,
+                     selector=sel[:50], error=str(e)[:60])
+            continue
+
+    return popup_found
+
+
 async def _check_subscription_expired(page: Page, account: str = ""):
     """
     检测 Echotik 账号订阅到期弹窗
@@ -729,18 +780,9 @@ async def _download_one(
     # 截图记录导航前的页面状态（用于对比和调试）
     await _screenshot(page, f"{module_name}_{win}_before_nav")
 
-    # 点击前先关闭登录后可能出现的欢迎弹窗（Start Now 按钮）
-    # 这个弹窗会遮挡侧边栏，必须先关闭
-    try:
-        loc = page.locator("button:has-text('Start Now')")
-        if await loc.count() > 0:
-            await loc.first.click(timeout=3_000)
-            log_node("欢迎弹窗已关闭", level="INFO")
-            await page.wait_for_timeout(1_000)
-            # 关闭弹窗后检查是否触发了订阅过期提示
-            await _check_subscription_expired(page, account)
-    except Exception:
-        pass  # 没有弹窗则忽略
+    # 点击前先清理运行期弹窗/遮罩，避免遮挡侧边栏
+    await _dismiss_runtime_popup(page, module_name=module_name,
+                                 stage="before_sidebar_nav", account=account)
 
     # ── 点击一级菜单展开箭头（使用录制的精确选择器） ──
     # 先检查子菜单是否已展开（重试场景下可能已展开，再点会收起）
@@ -767,12 +809,24 @@ async def _download_one(
             await page.wait_for_timeout(1_000)
             await _check_subscription_expired(page, account)
         except Exception as e:
-            # 一级菜单展开失败，无法继续导航，直接返回失败
-            await _screenshot(page, f"{module_name}_{win}_nav_fail")
-            write_event(STAGE_SIDEBAR_PARENT, "FAILED", context={"module": module_name, "win": win, "category": category, "account": account}, detail=str(e)[:120], screenshot=f"logs/{module_name}_{win}_nav_fail*.png")
-            return DownloadResult(module=module_name, win=win, category=category,
-                                  status="failed",
-                                  reason=f"一级菜单展开失败: {str(e)[:60]}")
+            log_node("一级菜单首次点击失败，尝试关闭弹窗后重试", level="WARN",
+                     module=module_name, error=str(e)[:80])
+            await _dismiss_runtime_popup(page, module_name=module_name,
+                                         stage="sidebar_parent_retry", account=account)
+            try:
+                loc = page.locator(nav_parent_selector)
+                await loc.scroll_into_view_if_needed(timeout=5_000)
+                await loc.click(timeout=8_000, force=True)
+                log_node("一级菜单重试后已展开", level="INFO", module=module_name)
+                await page.wait_for_timeout(1_000)
+                await _check_subscription_expired(page, account)
+            except Exception as e2:
+                # 一级菜单展开失败，无法继续导航，直接返回失败
+                await _screenshot(page, f"{module_name}_{win}_nav_fail")
+                write_event(STAGE_SIDEBAR_PARENT, "FAILED", context={"module": module_name, "win": win, "category": category, "account": account}, detail=str(e2)[:120], screenshot=f"logs/{module_name}_{win}_nav_fail*.png")
+                return DownloadResult(module=module_name, win=win, category=category,
+                                      status="failed",
+                                      reason=f"一级菜单展开失败: {str(e2)[:60]}")
 
         await page.wait_for_timeout(1_000)  # 等子菜单展开动画完成
 
@@ -789,12 +843,25 @@ async def _download_one(
         await page.wait_for_timeout(1_000)
         await _check_subscription_expired(page, account)
     except Exception as e:
-        # 二级菜单点击失败，无法到达目标页面，返回失败
-        await _screenshot(page, f"{module_name}_{win}_nav_fail")
-        write_event(STAGE_SIDEBAR_CHILD, "FAILED", context={"module": module_name, "win": win, "category": category, "account": account}, detail=str(e)[:120], screenshot=f"logs/{module_name}_{win}_nav_fail*.png")
-        return DownloadResult(module=module_name, win=win, category=category,
-                              status="failed",
-                              reason=f"二级菜单点击失败: {str(e)[:60]}")
+        log_node("二级菜单首次点击失败，尝试关闭弹窗后重试", level="WARN",
+                 module=module_name, nav_child=nav_child, error=str(e)[:80])
+        await _dismiss_runtime_popup(page, module_name=module_name,
+                                     stage="sidebar_child_retry", account=account)
+        try:
+            loc = page.locator(f"#{submenu_id}").get_by_role("link", name=nav_child)
+            await loc.wait_for(state="visible", timeout=5_000)
+            await loc.click(timeout=8_000, force=True)
+            log_node("二级菜单重试后已点击", level="INFO", module=module_name,
+                     nav_child=nav_child)
+            await page.wait_for_timeout(1_000)
+            await _check_subscription_expired(page, account)
+        except Exception as e2:
+            # 二级菜单点击失败，无法到达目标页面，返回失败
+            await _screenshot(page, f"{module_name}_{win}_nav_fail")
+            write_event(STAGE_SIDEBAR_CHILD, "FAILED", context={"module": module_name, "win": win, "category": category, "account": account}, detail=str(e2)[:120], screenshot=f"logs/{module_name}_{win}_nav_fail*.png")
+            return DownloadResult(module=module_name, win=win, category=category,
+                                  status="failed",
+                                  reason=f"二级菜单点击失败: {str(e2)[:60]}")
 
     # 导航完成后等待5秒，让页面开始加载数据
     await page.wait_for_timeout(5_000)
