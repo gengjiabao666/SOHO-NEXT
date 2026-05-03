@@ -189,6 +189,62 @@ async def _dismiss_runtime_popup(page: Page, module_name: str = "", stage: str =
     return popup_found
 
 
+def _infer_nav_parent_label(module_name: str, nav_child: str) -> str:
+    """
+    根据模块名/二级菜单名推断一级菜单文案，作为脆弱 CSS 选择器失效时的兜底。
+    """
+    if module_name in ("商品榜", "新品榜"):
+        return "选品"
+    if module_name == "小店榜":
+        return "小店"
+
+    if nav_child in ("Top Sold", "New Products", "Hot Promoted"):
+        return "选品"
+    if nav_child == "Best Cross-border Seller":
+        return "小店"
+    return ""
+
+
+async def _expand_sidebar_parent_resilient(page: Page, parent_label: str,
+                                           module_name: str = "",
+                                           account: str = "") -> bool:
+    """
+    使用一级菜单文案自适应展开侧边栏，避免依赖 nth-child / 动态 submenu id。
+    """
+    if not parent_label:
+        return False
+
+    log_node("尝试一级菜单文案兜底", level="INFO",
+             module=module_name, parent_label=parent_label)
+    return await _click_by_text_enhanced(
+        page,
+        parent_label,
+        timeout=10_000,
+        desc=f"一级菜单: {parent_label}",
+        account=account,
+    )
+
+
+async def _click_sidebar_child_resilient(page: Page, nav_child: str,
+                                         module_name: str = "",
+                                         account: str = "") -> bool:
+    """
+    使用链接文案自适应点击二级菜单，避免依赖动态 submenu_id。
+    """
+    if not nav_child:
+        return False
+
+    log_node("尝试二级菜单文案兜底", level="INFO",
+             module=module_name, nav_child=nav_child)
+    return await _click_by_text_enhanced(
+        page,
+        nav_child,
+        timeout=10_000,
+        desc=f"二级菜单: {nav_child}",
+        account=account,
+    )
+
+
 async def _check_subscription_expired(page: Page, account: str = ""):
     """
     检测 Echotik 账号订阅到期弹窗
@@ -784,13 +840,15 @@ async def _download_one(
     await _dismiss_runtime_popup(page, module_name=module_name,
                                  stage="before_sidebar_nav", account=account)
 
-    # ── 点击一级菜单展开箭头（使用录制的精确选择器） ──
+    # ── 点击一级菜单展开箭头（优先旧 selector，失败后按文案自适应兜底） ──
     # 先检查子菜单是否已展开（重试场景下可能已展开，再点会收起）
     submenu_visible = False
     try:
         submenu_visible = await page.locator(f"#{submenu_id}").is_visible()
     except Exception:
         pass
+
+    parent_label = _infer_nav_parent_label(module_name, nav_child)
 
     if submenu_visible:
         # 子菜单已展开，跳过一级菜单点击（避免重复点击导致收起）
@@ -799,7 +857,7 @@ async def _download_one(
     else:
         # 子菜单未展开，需要点击一级菜单箭头来展开
         log_node("点击一级菜单展开箭头", level="INFO", module=module_name,
-                 selector=nav_parent_selector)
+                 selector=nav_parent_selector, parent_label=parent_label)
         try:
             loc = page.locator(nav_parent_selector)
             # 先滚动到元素可见区域（侧边栏可能很长）
@@ -821,16 +879,20 @@ async def _download_one(
                 await page.wait_for_timeout(1_000)
                 await _check_subscription_expired(page, account)
             except Exception as e2:
-                # 一级菜单展开失败，无法继续导航，直接返回失败
-                await _screenshot(page, f"{module_name}_{win}_nav_fail")
-                write_event(STAGE_SIDEBAR_PARENT, "FAILED", context={"module": module_name, "win": win, "category": category, "account": account}, detail=str(e2)[:120], screenshot=f"logs/{module_name}_{win}_nav_fail*.png")
-                return DownloadResult(module=module_name, win=win, category=category,
-                                      status="failed",
-                                      reason=f"一级菜单展开失败: {str(e2)[:60]}")
+                fallback_ok = await _expand_sidebar_parent_resilient(
+                    page, parent_label, module_name=module_name, account=account
+                )
+                if not fallback_ok:
+                    # 一级菜单展开失败，无法继续导航，直接返回失败
+                    await _screenshot(page, f"{module_name}_{win}_nav_fail")
+                    write_event(STAGE_SIDEBAR_PARENT, "FAILED", context={"module": module_name, "win": win, "category": category, "account": account}, detail=str(e2)[:120], screenshot=f"logs/{module_name}_{win}_nav_fail*.png")
+                    return DownloadResult(module=module_name, win=win, category=category,
+                                          status="failed",
+                                          reason=f"一级菜单展开失败: {str(e2)[:60]}")
 
         await page.wait_for_timeout(1_000)  # 等子菜单展开动画完成
 
-    # ── 点击二级菜单链接（在 submenu 容器内精确匹配） ──
+    # ── 点击二级菜单链接（优先 submenu 容器精确匹配，失败后按文案自适应兜底） ──
     log_node(f"点击二级菜单: {nav_child}", level="INFO", module=module_name,
              submenu_id=submenu_id)
     try:
@@ -856,12 +918,16 @@ async def _download_one(
             await page.wait_for_timeout(1_000)
             await _check_subscription_expired(page, account)
         except Exception as e2:
-            # 二级菜单点击失败，无法到达目标页面，返回失败
-            await _screenshot(page, f"{module_name}_{win}_nav_fail")
-            write_event(STAGE_SIDEBAR_CHILD, "FAILED", context={"module": module_name, "win": win, "category": category, "account": account}, detail=str(e2)[:120], screenshot=f"logs/{module_name}_{win}_nav_fail*.png")
-            return DownloadResult(module=module_name, win=win, category=category,
-                                  status="failed",
-                                  reason=f"二级菜单点击失败: {str(e2)[:60]}")
+            fallback_ok = await _click_sidebar_child_resilient(
+                page, nav_child, module_name=module_name, account=account
+            )
+            if not fallback_ok:
+                # 二级菜单点击失败，无法到达目标页面，返回失败
+                await _screenshot(page, f"{module_name}_{win}_nav_fail")
+                write_event(STAGE_SIDEBAR_CHILD, "FAILED", context={"module": module_name, "win": win, "category": category, "account": account}, detail=str(e2)[:120], screenshot=f"logs/{module_name}_{win}_nav_fail*.png")
+                return DownloadResult(module=module_name, win=win, category=category,
+                                      status="failed",
+                                      reason=f"二级菜单点击失败: {str(e2)[:60]}")
 
     # 导航完成后等待5秒，让页面开始加载数据
     await page.wait_for_timeout(5_000)

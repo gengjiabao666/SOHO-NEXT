@@ -38,7 +38,6 @@ LOGIN_SUCCESS_SELECTORS = [
     "text=New Products",
     "text=Best Cross-border Seller",
     "text=Product Category",
-    "text=Echotik",
 ]
 
 LOGIN_SUCCESS_URL_HINTS = [
@@ -46,6 +45,16 @@ LOGIN_SUCCESS_URL_HINTS = [
     "/products/",
     "/shop/",
     "/leaderboard/",
+]
+
+APP_ENTRY_CANDIDATES = [
+    "https://www.echotik.live/en/products/top-sold",
+    "https://www.echotik.live/products/top-sold",
+    "https://www.echotik.live/en/leaderboard/product-ranking",
+    "https://www.echotik.live/leaderboard/product-ranking",
+    "https://www.echotik.live/en/board",
+    "https://www.echotik.live/board",
+    "https://www.echotik.live/en",
 ]
 
 LOGIN_ERROR_KEYWORDS = [
@@ -138,10 +147,10 @@ class BrowserSession:
             pass
         return ""
 
-    async def _is_logged_in(self, page: Page) -> bool:
+    async def _is_app_ready(self, page: Page) -> bool:
         current_url = page.url.lower()
-        if any(hint in current_url for hint in LOGIN_SUCCESS_URL_HINTS):
-            return True
+        if not any(hint in current_url for hint in LOGIN_SUCCESS_URL_HINTS):
+            return False
 
         for sel in LOGIN_SUCCESS_SELECTORS:
             try:
@@ -151,6 +160,23 @@ class BrowserSession:
             except Exception:
                 continue
 
+        return False
+
+    async def _ensure_app_entry(self, page: Page, account: str = "") -> bool:
+        """确保进入真正可采集的业务页，而不是官网营销首页。"""
+        for url in APP_ENTRY_CANDIDATES:
+            try:
+                log_node("尝试进入业务页", level="INFO", target=url)
+                await page.goto(url, timeout=30_000)
+                await page.wait_for_load_state("domcontentloaded", timeout=10_000)
+                await page.wait_for_timeout(2000)
+                await self._dismiss_popup(page, stage="app_entry")
+                if await self._is_app_ready(page):
+                    log_node("业务页已就绪", level="INFO", url=page.url)
+                    return True
+            except Exception as e:
+                log_node("业务页跳转失败", level="DEBUG", target=url, error=str(e)[:80])
+                continue
         return False
 
     async def _dismiss_popup(self, page: Page, stage: str = "post_login") -> bool:
@@ -215,12 +241,12 @@ class BrowserSession:
                     await page.wait_for_timeout(2000)
                     await self._dismiss_popup(page, stage="cookie_login")
 
-                    if await self._is_logged_in(page):
+                    if await self._ensure_app_entry(page, account=masked):
                         log_node("Cookie有效，登录成功", level="INFO", account=masked, url=page.url)
                         write_event(STAGE_LOGIN, "SUCCESS", context={"account": masked, "method": "cookie"})
                         return True
 
-                    log_node("Cookie已失效，清除并改用账号密码登录", level="WARN", account=masked)
+                    log_node("Cookie未进入业务页，清除并改用账号密码登录", level="WARN", account=masked, url=page.url)
                     await self.context.clear_cookies()
                 except Exception as e:
                     log_node("Cookie登录出错", level="WARN", account=masked, error=str(e)[:80])
@@ -308,8 +334,8 @@ class BrowserSession:
                 await self._save_debug_screenshot(page, "step5_login_error", full_page=True)
                 return False
 
-            if await self._is_logged_in(page):
-                log_node("检测到登录成功标志，登录完成", level="INFO", account=masked, url=current_url, round=i + 1)
+            if await self._ensure_app_entry(page, account=masked):
+                log_node("检测到登录成功标志，登录完成", level="INFO", account=masked, url=page.url, round=i + 1)
                 log_node("等待页面完全加载（10秒）...", level="INFO")
                 await page.wait_for_timeout(10_000)
                 await self._dismiss_popup(page, stage="post_login_final")
