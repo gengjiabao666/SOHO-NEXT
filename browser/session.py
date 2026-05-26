@@ -28,6 +28,7 @@ from playwright.async_api import BrowserContext, Page
 
 from utils.logger import log_node
 from utils.events import write_event, STAGE_LOGIN
+from browser.popup_handler import dismiss_all_popups
 
 load_dotenv()
 
@@ -62,7 +63,7 @@ LOGIN_ERROR_KEYWORDS = [
     "not match", "too many", "try again", "verification",
     "captcha", "blocked", "forbidden", "denied",
     "不正确", "错误", "失败", "账号或密码", "密码错误",
-    "验证码", "验证", "请稍后再试", "频繁", "受限",
+    "请稍后再试", "频繁", "受限",
 ]
 
 COOKIE_DIR = Path("config")
@@ -170,7 +171,7 @@ class BrowserSession:
                 await page.goto(url, timeout=30_000)
                 await page.wait_for_load_state("domcontentloaded", timeout=10_000)
                 await page.wait_for_timeout(2000)
-                await self._dismiss_popup(page, stage="app_entry")
+                await dismiss_all_popups(page, stage="app_entry")
                 if await self._is_app_ready(page):
                     log_node("业务页已就绪", level="INFO", url=page.url)
                     return True
@@ -239,7 +240,7 @@ class BrowserSession:
                     await self.context.add_cookies(cookies)
                     await page.goto("https://www.echotik.live", timeout=30_000)
                     await page.wait_for_timeout(2000)
-                    await self._dismiss_popup(page, stage="cookie_login")
+                    await dismiss_all_popups(page, stage="cookie_login")
 
                     if await self._ensure_app_entry(page, account=masked):
                         log_node("Cookie有效，登录成功", level="INFO", account=masked, url=page.url)
@@ -281,7 +282,7 @@ class BrowserSession:
         log_node("登录页加载完成", level="INFO", url=page.url)
 
         # 先尝试清一次登录页自身的公告/遮罩
-        await self._dismiss_popup(page, stage="login_page")
+        await dismiss_all_popups(page, stage="login_page")
 
         log_node("步骤2/5 等待表单元素可交互", level="INFO")
         try:
@@ -325,7 +326,7 @@ class BrowserSession:
                 pass
 
             # 登录阶段与登录后都尝试处理新增弹窗/遮罩
-            await self._dismiss_popup(page, stage=f"after_login_click_{i+1}")
+            await dismiss_all_popups(page, stage=f"after_login_click_{i+1}")
 
             current_url = page.url
             error_text = await self._check_page_for_login_error(page)
@@ -338,7 +339,7 @@ class BrowserSession:
                 log_node("检测到登录成功标志，登录完成", level="INFO", account=masked, url=page.url, round=i + 1)
                 log_node("等待页面完全加载（10秒）...", level="INFO")
                 await page.wait_for_timeout(10_000)
-                await self._dismiss_popup(page, stage="post_login_final")
+                await dismiss_all_popups(page, stage="post_login_final")
                 await self._save_debug_screenshot(page, "login_success_board", full_page=True)
                 return True
 

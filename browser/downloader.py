@@ -43,7 +43,8 @@ from playwright.async_api import Page    # Playwright 异步页面对象
 # ============================================================
 # 项目内部模块导入
 # ============================================================
-from browser.anomaly import check_page_anomaly    # 页面异常检测（验证码、封禁等）
+from browser.anomaly import check_page_anomaly
+from browser.popup_handler import dismiss_all_popups, dismiss_with_retry, reset_ai_counter    # 页面异常检测（验证码、封禁等）
 from browser.session import BrowserSession         # 浏览器会话管理
 from utils.freshness import is_fresh               # 数据新鲜度检测（MD5去重）
 from utils.logger import log_node                  # 结构化日志记录
@@ -837,8 +838,7 @@ async def _download_one(
     await _screenshot(page, f"{module_name}_{win}_before_nav")
 
     # 点击前先清理运行期弹窗/遮罩，避免遮挡侧边栏
-    await _dismiss_runtime_popup(page, module_name=module_name,
-                                 stage="before_sidebar_nav", account=account)
+    await dismiss_all_popups(page, stage="before_sidebar_nav", account=account)
 
     # ── 点击一级菜单展开箭头（优先旧 selector，失败后按文案自适应兜底） ──
     # 先检查子菜单是否已展开（重试场景下可能已展开，再点会收起）
@@ -869,8 +869,7 @@ async def _download_one(
         except Exception as e:
             log_node("一级菜单首次点击失败，尝试关闭弹窗后重试", level="WARN",
                      module=module_name, error=str(e)[:80])
-            await _dismiss_runtime_popup(page, module_name=module_name,
-                                         stage="sidebar_parent_retry", account=account)
+            await dismiss_all_popups(page, stage="sidebar_parent_retry", account=account)
             try:
                 loc = page.locator(nav_parent_selector)
                 await loc.scroll_into_view_if_needed(timeout=5_000)
@@ -907,8 +906,7 @@ async def _download_one(
     except Exception as e:
         log_node("二级菜单首次点击失败，尝试关闭弹窗后重试", level="WARN",
                  module=module_name, nav_child=nav_child, error=str(e)[:80])
-        await _dismiss_runtime_popup(page, module_name=module_name,
-                                     stage="sidebar_child_retry", account=account)
+        await dismiss_all_popups(page, stage="sidebar_child_retry", account=account)
         try:
             loc = page.locator(f"#{submenu_id}").get_by_role("link", name=nav_child)
             await loc.wait_for(state="visible", timeout=5_000)
